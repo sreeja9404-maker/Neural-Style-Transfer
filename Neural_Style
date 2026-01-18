@@ -1,0 +1,105 @@
+import os
+# Display all files present in the current directory
+print("FILES IN FOLDER:", os.listdir())
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.transforms as transforms
+import torchvision.models as models
+from PIL import Image
+from torchvision.utils import save_image
+
+# Select CPU as the computation device for stability
+device = torch.device("cpu")
+
+def load_image(path, size=128):
+    # Open image file and convert it to RGB format
+    image = Image.open(path).convert("RGB")
+    # Resize image and convert it to a tensor
+    transform = transforms.Compose([
+        transforms.Resize((size, size)),
+        transforms.ToTensor()
+    ])
+    # Add batch dimension and move image to selected device
+    return transform(image).unsqueeze(0).to(device)
+
+# Load the content image
+content = load_image("content.jpg")
+# Load the style image
+style = load_image("style.jpg")
+
+# Load pre-trained VGG16 model and extract only feature layers
+vgg = models.vgg16(pretrained=True).features.to(device).eval()
+
+# Disable gradient calculation for VGG model parameters
+for param in vgg.parameters():
+    param.requires_grad = False
+
+def get_features(x, model):
+    # Store outputs of convolutional layers
+    features = []
+    for layer in model:
+        x = layer(x)
+        # Save feature maps from convolution layers
+        if isinstance(layer, nn.Conv2d):
+            features.append(x)
+    return features
+
+def gram_matrix(f):
+    # Get number of channels, height, and width
+    c, h, w = f.size()[1:]
+    # Reshape feature map into 2D matrix
+    f = f.view(c, h * w)
+    # Compute Gram matrix to represent style
+    return torch.mm(f, f.t())
+
+# Extract features of content and style images without computing gradients
+with torch.no_grad():
+    content_features = get_features(content, vgg)
+    style_features = get_features(style, vgg)
+    # Compute Gram matrices for style features
+    style_grams = [gram_matrix(f) for f in style_features]
+
+# Initialize target image as a copy of content image
+target = content.clone().requires_grad_(True)
+
+# Define optimizer to update target image pixels
+optimizer = optim.Adam([target], lr=0.02)
+
+# Set weights to balance content and style influence
+content_weight = 1
+style_weight = 1e4
+
+# Number of training iterations
+epochs = 30
+
+for i in range(epochs):
+    # Extract features of the target image
+    target_features = get_features(target, vgg)
+
+    # Compute content loss using feature similarity
+    content_loss = torch.mean(
+        (target_features[5] - content_features[5]) ** 2
+    )
+
+    # Compute style loss using Gram matrix similarity
+    style_loss = 0
+    for t, s in zip(target_features, style_grams):
+        style_loss += torch.mean((gram_matrix(t) - s) ** 2)
+
+    # Combine content and style losses
+    loss = content_weight * content_loss + style_weight * style_loss
+
+    # Clear previous gradients
+    optimizer.zero_grad()
+    # Backpropagate loss
+    loss.backward()
+    # Update target image
+    optimizer.step()
+
+    print(f"Epoch {i+1}/{epochs} | Loss: {loss.item():.2f}")
+
+# Save the final stylized image to disk
+save_image(target, "output.png")
+print("DONE! Output saved as output.png")
